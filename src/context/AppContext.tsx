@@ -4,6 +4,7 @@ import {
   useReducer,
   useEffect,
   useCallback,
+  useState,
 } from 'react'
 import type { ReactNode } from 'react'
 import type {
@@ -15,12 +16,25 @@ import type {
   WeeklyFocus,
   Task,
 } from '../types'
-import { loadState, saveState } from '../services/storage'
 import { generateId, todayStr } from '../utils/id'
+import {
+  loadUserData,
+  upsertGoal,
+  removeGoal,
+  upsertProject,
+  removeProject,
+  upsertHabit,
+  removeHabit,
+  upsertNote,
+  removeNote,
+  upsertWeeklyFocus,
+  batchUpsert,
+} from '../services/firestore'
 
-// ─── Action Types ────────────────────────────────────────────────────────────
+// ─── Action Types ─────────────────────────────────────────────────────────────
 
 type Action =
+  | { type: 'LOAD_ALL'; state: AppState }
   | { type: 'ADD_GOAL'; goal: Goal }
   | { type: 'UPDATE_GOAL'; goal: Goal }
   | { type: 'DELETE_GOAL'; id: string }
@@ -39,23 +53,28 @@ type Action =
   | { type: 'ADD_TASK'; projectId: string; task: Task }
   | { type: 'DELETE_TASK'; projectId: string; taskId: string }
 
-// ─── Reducer ─────────────────────────────────────────────────────────────────
+// ─── Reducer ──────────────────────────────────────────────────────────────────
+
+const emptyState: AppState = {
+  goals: [], projects: [], habits: [], notes: [], weeklyFocuses: [],
+}
 
 function reducer(state: AppState, action: Action): AppState {
   switch (action.type) {
+    case 'LOAD_ALL':
+      return action.state
+
     case 'ADD_GOAL':
       return { ...state, goals: [...state.goals, action.goal] }
 
     case 'UPDATE_GOAL':
       return {
         ...state,
-        goals: state.goals.map((g) =>
-          g.id === action.goal.id ? action.goal : g
-        ),
+        goals: state.goals.map((g) => g.id === action.goal.id ? action.goal : g),
       }
 
     case 'DELETE_GOAL': {
-      const goals = state.goals.filter((g) => g.id !== action.id)
+      const goals    = state.goals.filter((g) => g.id !== action.id)
       const projects = state.projects.map((p) =>
         p.goalId === action.id ? { ...p, goalId: undefined } : p
       )
@@ -82,12 +101,7 @@ function reducer(state: AppState, action: Action): AppState {
         if (old.goalId) {
           goals = goals.map((g) =>
             g.id === old.goalId
-              ? {
-                  ...g,
-                  projectIds: g.projectIds.filter(
-                    (id) => id !== action.project.id
-                  ),
-                }
+              ? { ...g, projectIds: g.projectIds.filter((id) => id !== action.project.id) }
               : g
           )
         }
@@ -110,9 +124,8 @@ function reducer(state: AppState, action: Action): AppState {
 
     case 'DELETE_PROJECT': {
       const projects = state.projects.filter((p) => p.id !== action.id)
-      const goals = state.goals.map((g) => ({
-        ...g,
-        projectIds: g.projectIds.filter((id) => id !== action.id),
+      const goals    = state.goals.map((g) => ({
+        ...g, projectIds: g.projectIds.filter((id) => id !== action.id),
       }))
       const habits = state.habits.map((h) =>
         h.projectId === action.id ? { ...h, projectId: undefined } : h
@@ -140,10 +153,7 @@ function reducer(state: AppState, action: Action): AppState {
         if (old.projectId) {
           projects = projects.map((p) =>
             p.id === old.projectId
-              ? {
-                  ...p,
-                  habitIds: p.habitIds.filter((id) => id !== action.habit.id),
-                }
+              ? { ...p, habitIds: p.habitIds.filter((id) => id !== action.habit.id) }
               : p
           )
         }
@@ -157,18 +167,15 @@ function reducer(state: AppState, action: Action): AppState {
       }
       return {
         ...state,
-        habits: state.habits.map((h) =>
-          h.id === action.habit.id ? action.habit : h
-        ),
+        habits:   state.habits.map((h) => h.id === action.habit.id ? action.habit : h),
         projects,
       }
     }
 
     case 'DELETE_HABIT': {
-      const habits = state.habits.filter((h) => h.id !== action.id)
+      const habits   = state.habits.filter((h) => h.id !== action.id)
       const projects = state.projects.map((p) => ({
-        ...p,
-        habitIds: p.habitIds.filter((id) => id !== action.id),
+        ...p, habitIds: p.habitIds.filter((id) => id !== action.id),
       }))
       return { ...state, habits, projects }
     }
@@ -176,12 +183,10 @@ function reducer(state: AppState, action: Action): AppState {
     case 'TOGGLE_HABIT': {
       const habits = state.habits.map((h) => {
         if (h.id !== action.habitId) return h
-        const existing = h.completions.find((c) => c.date === action.date)
+        const existing    = h.completions.find((c) => c.date === action.date)
         const completions = existing
           ? h.completions.map((c) =>
-              c.date === action.date
-                ? { ...c, completed: !c.completed }
-                : c
+              c.date === action.date ? { ...c, completed: !c.completed } : c
             )
           : [...h.completions, { date: action.date, completed: true }]
         return { ...h, completions }
@@ -205,25 +210,16 @@ function reducer(state: AppState, action: Action): AppState {
     case 'UPDATE_NOTE':
       return {
         ...state,
-        notes: state.notes.map((n) =>
-          n.id === action.note.id ? action.note : n
-        ),
+        notes: state.notes.map((n) => n.id === action.note.id ? action.note : n),
       }
 
     case 'DELETE_NOTE':
-      return {
-        ...state,
-        notes: state.notes.filter((n) => n.id !== action.id),
-      }
+      return { ...state, notes: state.notes.filter((n) => n.id !== action.id) }
 
     case 'UPSERT_WEEKLY': {
-      const exists = state.weeklyFocuses.find(
-        (w) => w.weekStart === action.focus.weekStart
-      )
+      const exists = state.weeklyFocuses.find((w) => w.weekStart === action.focus.weekStart)
       const weeklyFocuses = exists
-        ? state.weeklyFocuses.map((w) =>
-            w.weekStart === action.focus.weekStart ? action.focus : w
-          )
+        ? state.weeklyFocuses.map((w) => w.weekStart === action.focus.weekStart ? action.focus : w)
         : [...state.weeklyFocuses, action.focus]
       return { ...state, weeklyFocuses }
     }
@@ -231,12 +227,7 @@ function reducer(state: AppState, action: Action): AppState {
     case 'TOGGLE_TASK': {
       const projects = state.projects.map((p) => {
         if (p.id !== action.projectId) return p
-        return {
-          ...p,
-          tasks: p.tasks.map((t) =>
-            t.id === action.taskId ? { ...t, completed: !t.completed } : t
-          ),
-        }
+        return { ...p, tasks: p.tasks.map((t) => t.id === action.taskId ? { ...t, completed: !t.completed } : t) }
       })
       return { ...state, projects }
     }
@@ -252,10 +243,7 @@ function reducer(state: AppState, action: Action): AppState {
     case 'DELETE_TASK': {
       const projects = state.projects.map((p) => {
         if (p.id !== action.projectId) return p
-        return {
-          ...p,
-          tasks: p.tasks.filter((t) => t.id !== action.taskId),
-        }
+        return { ...p, tasks: p.tasks.filter((t) => t.id !== action.taskId) }
       })
       return { ...state, projects }
     }
@@ -268,268 +256,266 @@ function reducer(state: AppState, action: Action): AppState {
 // ─── Context Interface ────────────────────────────────────────────────────────
 
 interface AppContextValue {
-  state: AppState
-  // Goals
-  addGoal: (
-    data: Omit<Goal, 'id' | 'createdAt' | 'projectIds'>
-  ) => void
-  updateGoal: (goal: Goal) => void
-  deleteGoal: (id: string) => void
-  // Projects
-  addProject: (
-    data: Omit<Project, 'id' | 'createdAt' | 'tasks' | 'habitIds' | 'noteIds'>
-  ) => void
+  state:   AppState
+  loading: boolean
+  addGoal:       (data: Omit<Goal, 'id' | 'createdAt' | 'projectIds'>) => void
+  updateGoal:    (goal: Goal) => void
+  deleteGoal:    (id: string) => void
+  addProject:    (data: Omit<Project, 'id' | 'createdAt' | 'tasks' | 'habitIds' | 'noteIds'>) => void
   updateProject: (project: Project) => void
   deleteProject: (id: string) => void
-  addTask: (projectId: string, title: string) => void
-  deleteTask: (projectId: string, taskId: string) => void
-  toggleTask: (projectId: string, taskId: string) => void
-  // Habits
-  addHabit: (data: Omit<Habit, 'id' | 'createdAt' | 'completions'>) => void
-  updateHabit: (habit: Habit) => void
-  deleteHabit: (id: string) => void
-  toggleHabit: (habitId: string, date?: string) => void
-  // Notes
-  addNote: (data: Omit<Note, 'id' | 'createdAt' | 'updatedAt'>) => void
-  updateNote: (note: Note) => void
-  deleteNote: (id: string) => void
-  // Weekly
-  upsertWeekly: (focus: WeeklyFocus) => void
-  // Computed
-  getGoalProgress: (goalId: string) => number
+  addTask:       (projectId: string, title: string) => void
+  deleteTask:    (projectId: string, taskId: string) => void
+  toggleTask:    (projectId: string, taskId: string) => void
+  addHabit:      (data: Omit<Habit, 'id' | 'createdAt' | 'completions'>) => void
+  updateHabit:   (habit: Habit) => void
+  deleteHabit:   (id: string) => void
+  toggleHabit:   (habitId: string, date?: string) => void
+  addNote:       (data: Omit<Note, 'id' | 'createdAt' | 'updatedAt'>) => void
+  updateNote:    (note: Note) => void
+  deleteNote:    (id: string) => void
+  upsertWeekly:  (focus: WeeklyFocus) => void
+  getGoalProgress:    (goalId: string) => number
   getProjectProgress: (projectId: string) => number
-  getHabitStreak: (habitId: string) => number
-  isHabitDoneToday: (habitId: string) => boolean
-  getTodayHabits: () => Habit[]
+  getHabitStreak:     (habitId: string) => number
+  isHabitDoneToday:   (habitId: string) => boolean
+  getTodayHabits:     () => Habit[]
 }
 
 const AppContext = createContext<AppContextValue | null>(null)
 
 // ─── Provider ─────────────────────────────────────────────────────────────────
 
-export function AppProvider({ children }: { children: ReactNode }) {
-  const [state, dispatch] = useReducer(reducer, undefined, loadState)
+export function AppProvider({ uid, children }: { uid: string; children: ReactNode }) {
+  const [state, dispatch] = useReducer(reducer, emptyState)
+  const [loading, setLoading] = useState(true)
 
   useEffect(() => {
-    saveState(state)
-  }, [state])
+    if (!uid) return
+    setLoading(true)
+    loadUserData(uid)
+      .then((data) => dispatch({ type: 'LOAD_ALL', state: data }))
+      .catch(console.error)
+      .finally(() => setLoading(false))
+  }, [uid])
 
-  // Goals
-  const addGoal = useCallback(
-    (data: Omit<Goal, 'id' | 'createdAt' | 'projectIds'>) => {
-      dispatch({
-        type: 'ADD_GOAL',
-        goal: {
-          ...data,
-          id: generateId(),
-          projectIds: [],
-          createdAt: new Date().toISOString(),
-        },
-      })
-    },
-    []
-  )
-  const updateGoal = useCallback(
-    (goal: Goal) => dispatch({ type: 'UPDATE_GOAL', goal }),
-    []
-  )
-  const deleteGoal = useCallback(
-    (id: string) => dispatch({ type: 'DELETE_GOAL', id }),
-    []
-  )
+  // ── Goals ──────────────────────────────────────────────────────────────────
 
-  // Projects
+  const addGoal = useCallback((data: Omit<Goal, 'id' | 'createdAt' | 'projectIds'>) => {
+    const goal: Goal = { ...data, id: generateId(), projectIds: [], createdAt: new Date().toISOString() }
+    dispatch({ type: 'ADD_GOAL', goal })
+    upsertGoal(uid, goal).catch(console.error)
+  }, [uid])
+
+  const updateGoal = useCallback((goal: Goal) => {
+    dispatch({ type: 'UPDATE_GOAL', goal })
+    upsertGoal(uid, goal).catch(console.error)
+  }, [uid])
+
+  const deleteGoal = useCallback((id: string) => {
+    const affected = state.projects.filter((p) => p.goalId === id)
+    dispatch({ type: 'DELETE_GOAL', id })
+    removeGoal(uid, id).catch(console.error)
+    affected.forEach((p) => upsertProject(uid, { ...p, goalId: undefined }).catch(console.error))
+  }, [uid, state.projects])
+
+  // ── Projects ───────────────────────────────────────────────────────────────
+
   const addProject = useCallback(
-    (
-      data: Omit<
-        Project,
-        'id' | 'createdAt' | 'tasks' | 'habitIds' | 'noteIds'
-      >
-    ) => {
-      dispatch({
-        type: 'ADD_PROJECT',
-        project: {
-          ...data,
-          id: generateId(),
-          tasks: [],
-          habitIds: [],
-          noteIds: [],
-          createdAt: new Date().toISOString(),
-        },
-      })
-    },
-    []
-  )
-  const updateProject = useCallback(
-    (project: Project) => dispatch({ type: 'UPDATE_PROJECT', project }),
-    []
-  )
-  const deleteProject = useCallback(
-    (id: string) => dispatch({ type: 'DELETE_PROJECT', id }),
-    []
-  )
-  const addTask = useCallback((projectId: string, title: string) => {
-    dispatch({
-      type: 'ADD_TASK',
-      projectId,
-      task: { id: generateId(), title, completed: false },
-    })
-  }, [])
-  const deleteTask = useCallback(
-    (projectId: string, taskId: string) =>
-      dispatch({ type: 'DELETE_TASK', projectId, taskId }),
-    []
-  )
-  const toggleTask = useCallback(
-    (projectId: string, taskId: string) =>
-      dispatch({ type: 'TOGGLE_TASK', projectId, taskId }),
-    []
-  )
-
-  // Habits
-  const addHabit = useCallback(
-    (data: Omit<Habit, 'id' | 'createdAt' | 'completions'>) => {
-      dispatch({
-        type: 'ADD_HABIT',
-        habit: {
-          ...data,
-          id: generateId(),
-          completions: [],
-          createdAt: new Date().toISOString(),
-        },
-      })
-    },
-    []
-  )
-  const updateHabit = useCallback(
-    (habit: Habit) => dispatch({ type: 'UPDATE_HABIT', habit }),
-    []
-  )
-  const deleteHabit = useCallback(
-    (id: string) => dispatch({ type: 'DELETE_HABIT', id }),
-    []
-  )
-  const toggleHabit = useCallback((habitId: string, date?: string) => {
-    dispatch({ type: 'TOGGLE_HABIT', habitId, date: date ?? todayStr() })
-  }, [])
-
-  // Notes
-  const addNote = useCallback(
-    (data: Omit<Note, 'id' | 'createdAt' | 'updatedAt'>) => {
-      const now = new Date().toISOString()
-      dispatch({
-        type: 'ADD_NOTE',
-        note: { ...data, id: generateId(), createdAt: now, updatedAt: now },
-      })
-    },
-    []
-  )
-  const updateNote = useCallback(
-    (note: Note) =>
-      dispatch({
-        type: 'UPDATE_NOTE',
-        note: { ...note, updatedAt: new Date().toISOString() },
-      }),
-    []
-  )
-  const deleteNote = useCallback(
-    (id: string) => dispatch({ type: 'DELETE_NOTE', id }),
-    []
-  )
-
-  // Weekly
-  const upsertWeekly = useCallback(
-    (focus: WeeklyFocus) => dispatch({ type: 'UPSERT_WEEKLY', focus }),
-    []
-  )
-
-  // ── Computed ──────────────────────────────────────────────────────────────
-
-  const getProjectProgress = useCallback(
-    (projectId: string): number => {
-      const project = state.projects.find((p) => p.id === projectId)
-      if (!project || project.tasks.length === 0) return 0
-      const done = project.tasks.filter((t) => t.completed).length
-      return Math.round((done / project.tasks.length) * 100)
-    },
-    [state.projects]
-  )
-
-  const getGoalProgress = useCallback(
-    (goalId: string): number => {
-      const goal = state.goals.find((g) => g.id === goalId)
-      if (!goal || goal.projectIds.length === 0) return 0
-      const progresses = goal.projectIds.map((pid) => getProjectProgress(pid))
-      return Math.round(
-        progresses.reduce((a, b) => a + b, 0) / progresses.length
-      )
-    },
-    [state.goals, getProjectProgress]
-  )
-
-  const getHabitStreak = useCallback(
-    (habitId: string): number => {
-      const habit = state.habits.find((h) => h.id === habitId)
-      if (!habit) return 0
-      let streak = 0
-      for (let i = 0; i < 365; i++) {
-        const d = new Date()
-        d.setDate(d.getDate() - i)
-        const dateStr = d.toISOString().split('T')[0]
-        const completion = habit.completions.find((c) => c.date === dateStr)
-        if (completion?.completed) {
-          streak++
-        } else if (i > 0) {
-          break
-        }
+    (data: Omit<Project, 'id' | 'createdAt' | 'tasks' | 'habitIds' | 'noteIds'>) => {
+      const project: Project = {
+        ...data, id: generateId(), tasks: [], habitIds: [], noteIds: [], createdAt: new Date().toISOString(),
       }
-      return streak
+      dispatch({ type: 'ADD_PROJECT', project })
+      const writes: Parameters<typeof batchUpsert>[1] = [{ col: 'projects', data: project }]
+      if (project.goalId) {
+        const goal = state.goals.find((g) => g.id === project.goalId)
+        if (goal) writes.push({ col: 'goals', data: { ...goal, projectIds: [...goal.projectIds, project.id] } })
+      }
+      batchUpsert(uid, writes).catch(console.error)
     },
-    [state.habits]
+    [uid, state.goals]
   )
 
-  const isHabitDoneToday = useCallback(
-    (habitId: string): boolean => {
-      const habit = state.habits.find((h) => h.id === habitId)
-      if (!habit) return false
-      const today = todayStr()
-      return habit.completions.some((c) => c.date === today && c.completed)
-    },
-    [state.habits]
-  )
+  const updateProject = useCallback((project: Project) => {
+    const old = state.projects.find((p) => p.id === project.id)
+    dispatch({ type: 'UPDATE_PROJECT', project })
+    const writes: Parameters<typeof batchUpsert>[1] = [{ col: 'projects', data: project }]
+    if (old && old.goalId !== project.goalId) {
+      if (old.goalId) {
+        const prevGoal = state.goals.find((g) => g.id === old.goalId)
+        if (prevGoal) writes.push({ col: 'goals', data: { ...prevGoal, projectIds: prevGoal.projectIds.filter((id) => id !== project.id) } })
+      }
+      if (project.goalId) {
+        const newGoal = state.goals.find((g) => g.id === project.goalId)
+        if (newGoal) writes.push({ col: 'goals', data: { ...newGoal, projectIds: [...newGoal.projectIds, project.id] } })
+      }
+    }
+    batchUpsert(uid, writes).catch(console.error)
+  }, [uid, state.projects, state.goals])
 
-  const getTodayHabits = useCallback((): Habit[] => {
-    return state.habits.filter((h) => h.frequency === 'daily')
+  const deleteProject = useCallback((id: string) => {
+    const affectedHabits = state.habits.filter((h) => h.projectId === id)
+    const affectedGoals  = state.goals.filter((g) => g.projectIds.includes(id))
+    dispatch({ type: 'DELETE_PROJECT', id })
+    removeProject(uid, id).catch(console.error)
+    affectedHabits.forEach((h) => upsertHabit(uid, { ...h, projectId: undefined }).catch(console.error))
+    affectedGoals.forEach((g) => upsertGoal(uid, { ...g, projectIds: g.projectIds.filter((pid) => pid !== id) }).catch(console.error))
+  }, [uid, state.habits, state.goals])
+
+  const addTask = useCallback((projectId: string, title: string) => {
+    const task: Task = { id: generateId(), title, completed: false }
+    dispatch({ type: 'ADD_TASK', projectId, task })
+    const p = state.projects.find((p) => p.id === projectId)
+    if (p) upsertProject(uid, { ...p, tasks: [...p.tasks, task] }).catch(console.error)
+  }, [uid, state.projects])
+
+  const deleteTask = useCallback((projectId: string, taskId: string) => {
+    dispatch({ type: 'DELETE_TASK', projectId, taskId })
+    const p = state.projects.find((p) => p.id === projectId)
+    if (p) upsertProject(uid, { ...p, tasks: p.tasks.filter((t) => t.id !== taskId) }).catch(console.error)
+  }, [uid, state.projects])
+
+  const toggleTask = useCallback((projectId: string, taskId: string) => {
+    dispatch({ type: 'TOGGLE_TASK', projectId, taskId })
+    const p = state.projects.find((p) => p.id === projectId)
+    if (p) upsertProject(uid, { ...p, tasks: p.tasks.map((t) => t.id === taskId ? { ...t, completed: !t.completed } : t) }).catch(console.error)
+  }, [uid, state.projects])
+
+  // ── Habits ─────────────────────────────────────────────────────────────────
+
+  const addHabit = useCallback((data: Omit<Habit, 'id' | 'createdAt' | 'completions'>) => {
+    const habit: Habit = { ...data, id: generateId(), completions: [], createdAt: new Date().toISOString() }
+    dispatch({ type: 'ADD_HABIT', habit })
+    const writes: Parameters<typeof batchUpsert>[1] = [{ col: 'habits', data: habit }]
+    if (habit.projectId) {
+      const p = state.projects.find((p) => p.id === habit.projectId)
+      if (p) writes.push({ col: 'projects', data: { ...p, habitIds: [...p.habitIds, habit.id] } })
+    }
+    batchUpsert(uid, writes).catch(console.error)
+  }, [uid, state.projects])
+
+  const updateHabit = useCallback((habit: Habit) => {
+    const old = state.habits.find((h) => h.id === habit.id)
+    dispatch({ type: 'UPDATE_HABIT', habit })
+    const writes: Parameters<typeof batchUpsert>[1] = [{ col: 'habits', data: habit }]
+    if (old && old.projectId !== habit.projectId) {
+      if (old.projectId) {
+        const prev = state.projects.find((p) => p.id === old.projectId)
+        if (prev) writes.push({ col: 'projects', data: { ...prev, habitIds: prev.habitIds.filter((id) => id !== habit.id) } })
+      }
+      if (habit.projectId) {
+        const next = state.projects.find((p) => p.id === habit.projectId)
+        if (next) writes.push({ col: 'projects', data: { ...next, habitIds: [...next.habitIds, habit.id] } })
+      }
+    }
+    batchUpsert(uid, writes).catch(console.error)
+  }, [uid, state.habits, state.projects])
+
+  const deleteHabit = useCallback((id: string) => {
+    const affected = state.projects.filter((p) => p.habitIds.includes(id))
+    dispatch({ type: 'DELETE_HABIT', id })
+    removeHabit(uid, id).catch(console.error)
+    affected.forEach((p) => upsertProject(uid, { ...p, habitIds: p.habitIds.filter((hid) => hid !== id) }).catch(console.error))
+  }, [uid, state.projects])
+
+  const toggleHabit = useCallback((habitId: string, date?: string) => {
+    const d = date ?? todayStr()
+    dispatch({ type: 'TOGGLE_HABIT', habitId, date: d })
+    const habit = state.habits.find((h) => h.id === habitId)
+    if (habit) {
+      const existing    = habit.completions.find((c) => c.date === d)
+      const completions = existing
+        ? habit.completions.map((c) => c.date === d ? { ...c, completed: !c.completed } : c)
+        : [...habit.completions, { date: d, completed: true }]
+      upsertHabit(uid, { ...habit, completions }).catch(console.error)
+    }
+  }, [uid, state.habits])
+
+  // ── Notes ──────────────────────────────────────────────────────────────────
+
+  const addNote = useCallback((data: Omit<Note, 'id' | 'createdAt' | 'updatedAt'>) => {
+    const now  = new Date().toISOString()
+    const note: Note = { ...data, id: generateId(), createdAt: now, updatedAt: now }
+    dispatch({ type: 'ADD_NOTE', note })
+    const writes: Parameters<typeof batchUpsert>[1] = [{ col: 'notes', data: note }]
+    if (note.linkedProjectId) {
+      const p = state.projects.find((p) => p.id === note.linkedProjectId)
+      if (p) writes.push({ col: 'projects', data: { ...p, noteIds: [...p.noteIds, note.id] } })
+    }
+    batchUpsert(uid, writes).catch(console.error)
+  }, [uid, state.projects])
+
+  const updateNote = useCallback((note: Note) => {
+    const updated = { ...note, updatedAt: new Date().toISOString() }
+    dispatch({ type: 'UPDATE_NOTE', note: updated })
+    upsertNote(uid, updated).catch(console.error)
+  }, [uid])
+
+  const deleteNote = useCallback((id: string) => {
+    dispatch({ type: 'DELETE_NOTE', id })
+    removeNote(uid, id).catch(console.error)
+  }, [uid])
+
+  // ── Weekly ─────────────────────────────────────────────────────────────────
+
+  const upsertWeekly = useCallback((focus: WeeklyFocus) => {
+    dispatch({ type: 'UPSERT_WEEKLY', focus })
+    upsertWeeklyFocus(uid, focus).catch(console.error)
+  }, [uid])
+
+  // ── Computed ───────────────────────────────────────────────────────────────
+
+  const getProjectProgress = useCallback((projectId: string): number => {
+    const p = state.projects.find((p) => p.id === projectId)
+    if (!p || p.tasks.length === 0) return 0
+    return Math.round((p.tasks.filter((t) => t.completed).length / p.tasks.length) * 100)
+  }, [state.projects])
+
+  const getGoalProgress = useCallback((goalId: string): number => {
+    const goal = state.goals.find((g) => g.id === goalId)
+    if (!goal || goal.projectIds.length === 0) return 0
+    const progresses = goal.projectIds.map((pid) => getProjectProgress(pid))
+    return Math.round(progresses.reduce((a, b) => a + b, 0) / progresses.length)
+  }, [state.goals, getProjectProgress])
+
+  const getHabitStreak = useCallback((habitId: string): number => {
+    const habit = state.habits.find((h) => h.id === habitId)
+    if (!habit) return 0
+    let streak = 0
+    for (let i = 0; i < 365; i++) {
+      const d = new Date()
+      d.setDate(d.getDate() - i)
+      const dateStr = d.toISOString().split('T')[0]
+      const c = habit.completions.find((c) => c.date === dateStr)
+      if (c?.completed) { streak++ } else if (i > 0) { break }
+    }
+    return streak
   }, [state.habits])
 
+  const isHabitDoneToday = useCallback((habitId: string): boolean => {
+    const habit = state.habits.find((h) => h.id === habitId)
+    if (!habit) return false
+    return habit.completions.some((c) => c.date === todayStr() && c.completed)
+  }, [state.habits])
+
+  const getTodayHabits = useCallback(
+    (): Habit[] => state.habits.filter((h) => h.frequency === 'daily'),
+    [state.habits]
+  )
+
   return (
-    <AppContext.Provider
-      value={{
-        state,
-        addGoal,
-        updateGoal,
-        deleteGoal,
-        addProject,
-        updateProject,
-        deleteProject,
-        addTask,
-        deleteTask,
-        toggleTask,
-        addHabit,
-        updateHabit,
-        deleteHabit,
-        toggleHabit,
-        addNote,
-        updateNote,
-        deleteNote,
-        upsertWeekly,
-        getGoalProgress,
-        getProjectProgress,
-        getHabitStreak,
-        isHabitDoneToday,
-        getTodayHabits,
-      }}
-    >
+    <AppContext.Provider value={{
+      state, loading,
+      addGoal, updateGoal, deleteGoal,
+      addProject, updateProject, deleteProject,
+      addTask, deleteTask, toggleTask,
+      addHabit, updateHabit, deleteHabit, toggleHabit,
+      addNote, updateNote, deleteNote,
+      upsertWeekly,
+      getGoalProgress, getProjectProgress,
+      getHabitStreak, isHabitDoneToday, getTodayHabits,
+    }}>
       {children}
     </AppContext.Provider>
   )
